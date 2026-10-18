@@ -29,15 +29,6 @@
     let currentItemData = null;
     let cachedSearchResults = [];
 
-    // Position state (defaults: bottom center, normal scale)
-    let posVertical = parseFloat(localStorage.getItem('subdl_sub_vertical') || '88');
-    let posHorizontal = parseFloat(localStorage.getItem('subdl_sub_horizontal') || '50');
-    let fontScale = parseFloat(localStorage.getItem('subdl_sub_font_scale') || '1.0');
-
-    let isAltDown = false;
-    let isDragging = false;
-    let activeCueText = '';
-
     // =========================================================
     // Jellyfin Web & PlaybackManager Integration
     // =========================================================
@@ -112,63 +103,95 @@
         return null;
     }
 
-    function hookPlaybackManager() {
+    // Check and handle auto-selection / auto-resume after reload
+    function checkPendingSubtitleSelection() {
+        const pendingRaw = sessionStorage.getItem('subdl_pending_selection');
+        if (!pendingRaw) return;
+
+        let pending;
+        try {
+            pending = JSON.parse(pendingRaw);
+        } catch (e) {
+            sessionStorage.removeItem('subdl_pending_selection');
+            return;
+        }
+
+        // Expire after 60 seconds
+        if (Date.now() - pending.timestamp > 60000) {
+            sessionStorage.removeItem('subdl_pending_selection');
+            return;
+        }
+
         const pm = getPlaybackManager();
-        if (!pm || pm._subdlHooked) return;
-        pm._subdlHooked = true;
+        const player = getActivePlayer();
 
-        const originalSetSubtitle = pm.setSubtitleStreamIndex.bind(pm);
-        pm.setSubtitleStreamIndex = function (index, player) {
-            const result = originalSetSubtitle(index, player);
+        // If player is not currently active, auto-resume playback
+        if (!player && pm && typeof pm.play === 'function') {
+            console.log('[SubtitleDownloader] Auto-resuming playback after reload for item:', pending.itemId);
+            // Update timestamp to give player time to spin up
+            pending.timestamp = Date.now();
+            sessionStorage.setItem('subdl_pending_selection', JSON.stringify(pending));
 
-            // Sync text track states with the video element
-            const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
-            if (video) {
-                const tracks = video.querySelectorAll('track[data-subdl="true"]');
-                tracks.forEach(tr => {
-                    for (let i = 0; i < video.textTracks.length; i++) {
-                        const tt = video.textTracks[i];
-                        if (tt.label === tr.label) {
-                            tt.mode = (index === -1) ? 'disabled' : 'hidden';
-                        }
-                    }
-                });
-            }
+            pm.play({
+                ids: [pending.itemId],
+                startPositionTicks: pending.startPositionTicks || 0
+            });
+            return;
+        }
 
-            if (index === -1) {
-                activeCueText = '';
-                const textEl = document.getElementById('subdlSubtitleText');
-                if (textEl && !isAltDown) {
-                    textEl.innerHTML = '';
+        // If player is active, search for the newly added subtitle track and select it
+        if (player && pm) {
+            const mediaSource = getActiveMediaSource();
+            const streams = (mediaSource && Array.isArray(mediaSource.MediaStreams))
+                ? mediaSource.MediaStreams
+                : (typeof pm.subtitleTracks === 'function' ? pm.subtitleTracks(player) : []);
+
+            if (Array.isArray(streams) && streams.length > 0) {
+                const targetLang = (pending.language || '').toLowerCase();
+                const targetPath = (pending.savedFilePath || '').toLowerCase();
+
+                // Find matching subtitle stream
+                const match = streams.find(s =>
+                    s.Type === 'Subtitle' &&
+                    (
+                        (targetPath && s.Path && s.Path.toLowerCase() === targetPath) ||
+                        ((s.Language && s.Language.toLowerCase().startsWith(targetLang)) ||
+                         (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang))) &&
+                        (s.IsExternal || (s.Path && s.Path.endsWith('.srt')))
+                    )
+                ) || streams.find(s =>
+                    s.Type === 'Subtitle' &&
+                    ((s.Language && s.Language.toLowerCase().startsWith(targetLang)) ||
+                     (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang)))
+                );
+
+                if (match && typeof pm.setSubtitleStreamIndex === 'function') {
+                    console.log('[SubtitleDownloader] Auto-selecting new subtitle stream index:', match.Index, match.DisplayTitle);
+                    pm.setSubtitleStreamIndex(match.Index, player);
+                    sessionStorage.removeItem('subdl_pending_selection');
+                    showToast(`✓ Subtitle active: ${match.DisplayTitle || match.Language || pending.language}`);
                 }
             }
-
-            return result;
-        };
+        }
     }
 
     // Observe player buttons bar
     function initObserver() {
-        hookPlaybackManager();
-
         if (window.Events) {
-            window.Events.on(window, 'playerchange', hookPlaybackManager);
-            window.Events.on(window, 'playbackstart', () => {
-                hookPlaybackManager();
-                ensureSubtitleOverlay();
-            });
+            window.Events.on(window, 'playerchange', checkPendingSubtitleSelection);
+            window.Events.on(window, 'playbackstart', checkPendingSubtitleSelection);
         }
 
         const observer = new MutationObserver(() => {
             attachPlayerControls();
-            ensureSubtitleOverlay();
-            hookPlaybackManager();
+            checkPendingSubtitleSelection();
         });
         observer.observe(document.body, { childList: true, subtree: true });
 
         attachPlayerControls();
-        ensureSubtitleOverlay();
-        initShortcutListeners();
+        setTimeout(checkPendingSubtitleSelection, 500);
+        setTimeout(checkPendingSubtitleSelection, 1500);
+        setTimeout(checkPendingSubtitleSelection, 3000);
     }
 
     function getActiveButtonsBar() {
@@ -181,7 +204,7 @@
         const bar = getActiveButtonsBar();
         if (!bar) return;
 
-        // 1. Download Subtitles Button
+        // Download Subtitles Button
         if (!bar.querySelector('#btnSubtitleDownloader')) {
             const btn = document.createElement('button');
             btn.id = 'btnSubtitleDownloader';
@@ -198,7 +221,7 @@
 
             btn.onclick = (e) => {
                 e.stopPropagation();
-                openSubtitleModal('search');
+                openSubtitleModal();
             };
 
             const subBtn = bar.querySelector('.btnSubtitles') || bar.querySelector('.btnAudio') || bar.querySelector('.btnVideoOsdSettings');
@@ -208,233 +231,10 @@
                 bar.appendChild(btn);
             }
         }
-
-        // 2. Subtitle Position Quick Button
-        if (!bar.querySelector('#btnSubtitlePosition')) {
-            const posBtn = document.createElement('button');
-            posBtn.id = 'btnSubtitlePosition';
-            posBtn.type = 'button';
-            posBtn.className = 'paper-icon-button-light autoSize btnSubtitlePosition osdIconButton';
-            posBtn.setAttribute('title', 'Change Subtitle Position (Or Hold Alt + Drag)');
-            posBtn.setAttribute('aria-label', 'Change Subtitle Position');
-            posBtn.innerHTML = `
-                <span class="material-icons" style="font-size:22px;">open_with</span>
-            `;
-
-            posBtn.onclick = (e) => {
-                e.stopPropagation();
-                openSubtitleModal('position');
-            };
-
-            const dlBtn = bar.querySelector('#btnSubtitleDownloader');
-            if (dlBtn && dlBtn.parentNode === bar) {
-                bar.insertBefore(posBtn, dlBtn.nextSibling);
-            } else {
-                bar.appendChild(posBtn);
-            }
-        }
     }
 
     // =========================================================
-    // Subtitle Overlay & Drag-and-Drop Positioning Engine
-    // =========================================================
-    function ensureSubtitleOverlay() {
-        const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
-        if (!video) return;
-
-        const container = video.parentElement || document.body;
-        if (container.querySelector('#subdlSubtitleOverlay')) return;
-
-        const overlay = document.createElement('div');
-        overlay.id = 'subdlSubtitleOverlay';
-        overlay.className = 'subdl-subtitle-overlay';
-
-        overlay.innerHTML = `
-            <div id="subdlSubtitleBox" class="subdl-subtitle-box">
-                <div class="subdl-drag-badge">
-                    <span class="material-icons" style="font-size: 13px;">open_with</span>
-                    <span>Drag to move</span>
-                </div>
-                <span id="subdlSubtitleText" class="subdl-subtitle-text"></span>
-            </div>
-        `;
-
-        // Video container should have relative positioning
-        const computedPos = window.getComputedStyle(container).position;
-        if (computedPos === 'static') {
-            container.style.position = 'relative';
-        }
-
-        container.appendChild(overlay);
-
-        applySavedPosition();
-        setupDragEvents(overlay, container);
-        hookVideoTracks(video);
-    }
-
-    function applySavedPosition() {
-        const box = document.getElementById('subdlSubtitleBox');
-        if (!box) return;
-
-        box.style.top = `${posVertical}%`;
-        box.style.left = `${posHorizontal}%`;
-        box.style.setProperty('--subdl-font-scale', fontScale);
-    }
-
-    function setSubtitlePosition(topPct, leftPct) {
-        posVertical = Math.max(5, Math.min(95, topPct));
-        if (leftPct !== undefined) {
-            posHorizontal = Math.max(10, Math.min(90, leftPct));
-        }
-
-        localStorage.setItem('subdl_sub_vertical', posVertical.toFixed(1));
-        localStorage.setItem('subdl_sub_horizontal', posHorizontal.toFixed(1));
-
-        applySavedPosition();
-
-        // Update slider if modal is open
-        const slider = document.getElementById('subdlPositionSlider');
-        const sliderVal = document.getElementById('subdlPositionSliderValue');
-        if (slider) slider.value = posVertical;
-        if (sliderVal) sliderVal.textContent = `${Math.round(posVertical)}%`;
-    }
-
-    function setFontScale(newScale) {
-        fontScale = Math.max(0.6, Math.min(2.5, newScale));
-        localStorage.setItem('subdl_sub_font_scale', fontScale.toFixed(2));
-        applySavedPosition();
-
-        const scaleVal = document.getElementById('subdlFontScaleValue');
-        if (scaleVal) scaleVal.textContent = `${Math.round(fontScale * 100)}%`;
-    }
-
-    function setupDragEvents(overlay, container) {
-        const box = overlay.querySelector('#subdlSubtitleBox');
-
-        let startX, startY;
-
-        box.addEventListener('mousedown', (e) => {
-            if (!isAltDown && !box.classList.contains('is-positioning')) {
-                return;
-            }
-
-            e.preventDefault();
-            e.stopPropagation();
-
-            isDragging = true;
-            box.classList.add('is-dragging');
-
-            const onMouseMove = (moveEvent) => {
-                if (!isDragging) return;
-                const rect = container.getBoundingClientRect();
-
-                const mouseX = moveEvent.clientX - rect.left;
-                const mouseY = moveEvent.clientY - rect.top;
-
-                const pctX = (mouseX / rect.width) * 100;
-                const pctY = (mouseY / rect.height) * 100;
-
-                setSubtitlePosition(pctY, pctX);
-            };
-
-            const onMouseUp = () => {
-                isDragging = false;
-                box.classList.remove('is-dragging');
-                window.removeEventListener('mousemove', onMouseMove);
-                window.removeEventListener('mouseup', onMouseUp);
-
-                showToast(`✓ Subtitle position saved (${Math.round(posVertical)}%)`);
-            };
-
-            window.addEventListener('mousemove', onMouseMove);
-            window.addEventListener('mouseup', onMouseUp);
-        });
-
-        // Click anywhere in video container while holding Alt to teleport subtitle there
-        container.addEventListener('click', (e) => {
-            if (!isAltDown) return;
-            const rect = container.getBoundingClientRect();
-            const pctY = ((e.clientY - rect.top) / rect.height) * 100;
-            const pctX = ((e.clientX - rect.left) / rect.width) * 100;
-
-            setSubtitlePosition(pctY, pctX);
-            showToast(`✓ Subtitle moved to ${Math.round(posVertical)}%`);
-        });
-    }
-
-    function initShortcutListeners() {
-        window.addEventListener('keydown', (e) => {
-            if (e.key === 'Alt') {
-                isAltDown = true;
-                updatePositioningMode();
-            }
-        });
-
-        window.addEventListener('keyup', (e) => {
-            if (e.key === 'Alt') {
-                isAltDown = false;
-                updatePositioningMode();
-            }
-        });
-
-        window.addEventListener('blur', () => {
-            isAltDown = false;
-            updatePositioningMode();
-        });
-    }
-
-    function updatePositioningMode() {
-        const box = document.getElementById('subdlSubtitleBox');
-        const textEl = document.getElementById('subdlSubtitleText');
-        if (!box || !textEl) return;
-
-        if (isAltDown) {
-            box.classList.add('is-positioning');
-            if (!activeCueText) {
-                textEl.innerHTML = '<span style="opacity:0.8;">[ Subtitle Sample Text — Drag to Position ]</span>';
-            }
-        } else {
-            box.classList.remove('is-positioning');
-            if (!activeCueText) {
-                textEl.innerHTML = '';
-            }
-        }
-    }
-
-    function hookVideoTracks(video) {
-        if (!video || video._subdlHooked) return;
-        video._subdlHooked = true;
-
-        function checkActiveCues() {
-            let foundText = '';
-            for (let i = 0; i < video.textTracks.length; i++) {
-                const tt = video.textTracks[i];
-                if (tt.mode === 'showing' || tt.mode === 'hidden') {
-                    if (tt.activeCues && tt.activeCues.length > 0) {
-                        for (let j = 0; j < tt.activeCues.length; j++) {
-                            foundText += (foundText ? '<br>' : '') + tt.activeCues[j].text;
-                        }
-                    }
-                }
-            }
-
-            activeCueText = foundText;
-            const textEl = document.getElementById('subdlSubtitleText');
-            if (textEl) {
-                if (foundText) {
-                    textEl.innerHTML = foundText;
-                } else if (!isAltDown) {
-                    textEl.innerHTML = '';
-                }
-            }
-        }
-
-        video.textTracks.addEventListener('change', checkActiveCues);
-        video.addEventListener('timeupdate', checkActiveCues);
-    }
-
-    // =========================================================
-    // Modal & In-Player UI
+    // Modal & In-Player Search UI
     // =========================================================
     async function getCurrentPlayingItem() {
         const pm = getPlaybackManager();
@@ -477,12 +277,10 @@
         return null;
     }
 
-    async function openSubtitleModal(initialTab = 'search') {
+    async function openSubtitleModal() {
         ensureModalDom();
         const backdrop = document.getElementById('subdlModalBackdrop');
         backdrop.classList.add('active');
-
-        switchTab(initialTab);
 
         const titleEl = document.getElementById('subdlTitle');
         const metaEl = document.getElementById('subdlMeta');
@@ -510,34 +308,13 @@
             inputEl.value = '';
         }
 
-        if (initialTab === 'search') {
-            performSearch();
-        }
+        performSearch();
     }
 
     function closeModal() {
         const backdrop = document.getElementById('subdlModalBackdrop');
         if (backdrop) {
             backdrop.classList.remove('active');
-        }
-    }
-
-    function switchTab(tabName) {
-        const searchView = document.getElementById('subdlSearchView');
-        const posView = document.getElementById('subdlPositionView');
-        const tabSearch = document.getElementById('subdlTabSearch');
-        const tabPos = document.getElementById('subdlTabPosition');
-
-        if (tabName === 'position') {
-            searchView.style.display = 'none';
-            posView.classList.add('active');
-            tabSearch.classList.remove('active');
-            tabPos.classList.add('active');
-        } else {
-            posView.classList.remove('active');
-            searchView.style.display = 'flex';
-            tabPos.classList.remove('active');
-            tabSearch.classList.add('active');
         }
     }
 
@@ -639,7 +416,7 @@
                 </div>
                 <button type="button" class="subdl-download-btn" id="btnDl_${index}">
                     <span class="material-icons" style="font-size: 18px;">download</span>
-                    <span>Download & Apply</span>
+                    <span>Download Subtitle</span>
                 </button>
             `;
 
@@ -681,23 +458,37 @@
                 throw new Error(response.Message || 'Download failed');
             }
 
-            // 1. Register subtitle into Jellyfin native CC menu and playbackManager
-            const streamIndex = registerSubtitleInNativeMenu(response, item);
-
-            // 2. Apply subtitle directly to active HTML5 video element and overlay
-            applySubtitleToPlayer(response, item, streamIndex);
-
             btnElement.className = 'subdl-download-btn applied';
             btnElement.innerHTML = `
                 <span class="material-icons" style="font-size: 18px;">check</span>
-                <span>Applied!</span>
+                <span>Downloaded!</span>
             `;
 
-            showToast(`✓ Subtitle applied: ${item.LanguageName || item.Language} (${item.Provider})`);
+            showToast(`✓ Subtitle downloaded! Refreshing player...`);
 
+            // Capture current playback tick position and item details
+            const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
+            const startPositionTicks = (video && video.currentTime)
+                ? Math.floor(video.currentTime * 10000000)
+                : 0;
+
+            try {
+                sessionStorage.setItem('subdl_pending_selection', JSON.stringify({
+                    itemId: currentItemData.Id,
+                    language: item.Language || response.Language || 'en',
+                    languageName: item.LanguageName || item.Language,
+                    savedFilePath: response.FilePath || '',
+                    startPositionTicks: startPositionTicks,
+                    timestamp: Date.now()
+                }));
+            } catch (storageErr) {
+                console.warn('[SubtitleDownloader] sessionStorage error:', storageErr);
+            }
+
+            // Refresh page after short delay so user sees confirmation and server file write finishes
             setTimeout(() => {
-                closeModal();
-            }, 1200);
+                window.location.reload();
+            }, 800);
 
         } catch (ex) {
             btnElement.disabled = false;
@@ -708,151 +499,6 @@
             `;
             alert('Failed to download subtitle: ' + (ex.message || ex));
         }
-    }
-
-    function registerSubtitleInNativeMenu(response, item) {
-        try {
-            const pm = getPlaybackManager();
-            const player = getActivePlayer();
-            const mediaSource = getActiveMediaSource();
-
-            if (!mediaSource) {
-                console.warn('[SubtitleDownloader] No active mediaSource found to register subtitle stream.');
-                return null;
-            }
-
-            if (!Array.isArray(mediaSource.MediaStreams)) {
-                mediaSource.MediaStreams = [];
-            }
-
-            const langCode = response.Language || item.Language || 'und';
-            const langName = item.LanguageName || item.Language || 'Unknown';
-            const displayTitle = `${langName} [Synced - ${item.Provider}]`;
-            const deliveryUrl = window.ApiClient.getUrl(`SubtitleDownloader/Stream/${response.DownloadId}/subtitles.vtt`);
-
-            // Compute unique stream index
-            const existingIndices = mediaSource.MediaStreams
-                .map(s => typeof s.Index === 'number' ? s.Index : -1)
-                .filter(idx => idx >= 0);
-            const maxIdx = existingIndices.length > 0 ? Math.max(...existingIndices) : 0;
-            const streamIndex = (response.StreamIndex != null && response.StreamIndex >= 0)
-                ? response.StreamIndex
-                : Math.max(100, maxIdx + 1);
-
-            let stream = mediaSource.MediaStreams.find(s =>
-                s.Index === streamIndex ||
-                (s.Type === 'Subtitle' && s.DeliveryUrl && s.DeliveryUrl.includes(response.DownloadId))
-            );
-
-            if (!stream) {
-                stream = {
-                    Index: streamIndex,
-                    Type: "Subtitle",
-                    Codec: "subrip",
-                    Language: langCode,
-                    LanguageCode: langCode,
-                    DisplayTitle: displayTitle,
-                    DisplayLanguage: langName,
-                    Title: `[Synced - ${item.Provider}]`,
-                    IsExternal: true,
-                    IsExternalUrl: true,
-                    DeliveryMethod: "External",
-                    DeliveryUrl: deliveryUrl,
-                    IsTextSubtitleStream: true,
-                    SupportsExternalStream: true,
-                    Score: 100
-                };
-                mediaSource.MediaStreams.push(stream);
-            } else {
-                stream.DisplayTitle = displayTitle;
-                stream.DeliveryUrl = deliveryUrl;
-                stream.Index = streamIndex;
-            }
-
-            // Sync with player._currentPlayOptions if separate object
-            if (player?._currentPlayOptions?.mediaSource?.MediaStreams &&
-                player._currentPlayOptions.mediaSource !== mediaSource) {
-                const pStreams = player._currentPlayOptions.mediaSource.MediaStreams;
-                if (!pStreams.find(s => s.Index === stream.Index)) {
-                    pStreams.push(stream);
-                }
-            }
-
-            // Unhide native CC button on player bar
-            const btnSubtitles = document.querySelector('.btnSubtitles');
-            if (btnSubtitles) {
-                btnSubtitles.classList.remove('hide');
-                btnSubtitles.disabled = false;
-            }
-
-            // Switch to the newly registered track in playbackManager
-            if (pm && player && typeof pm.setSubtitleStreamIndex === 'function') {
-                try {
-                    pm.setSubtitleStreamIndex(stream.Index, player);
-                    console.log(`[SubtitleDownloader] setSubtitleStreamIndex(${stream.Index}) successfully called.`);
-                } catch (err) {
-                    console.warn('[SubtitleDownloader] pm.setSubtitleStreamIndex error:', err);
-                    if (typeof player.setSubtitleStreamIndex === 'function') {
-                        player.setSubtitleStreamIndex(stream.Index);
-                    }
-                }
-            }
-
-            // Trigger mediastreamschange so the OSD and subtitle dialog update immediately
-            if (window.Events && player) {
-                try {
-                    window.Events.trigger(player, 'mediastreamschange');
-                } catch (e) {}
-            }
-
-            console.log(`[SubtitleDownloader] Subtitle "${displayTitle}" (Index ${stream.Index}) registered into Jellyfin native CC menu.`);
-            return stream.Index;
-        } catch (err) {
-            console.error('[SubtitleDownloader] Failed to register subtitle in native menu:', err);
-            return null;
-        }
-    }
-
-    function applySubtitleToPlayer(downloadResponse, item, streamIndex) {
-        const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
-        if (!video) return;
-
-        const vttContent = downloadResponse.VttContent || downloadResponse.SubtitleText;
-        if (!vttContent) return;
-
-        const blob = new Blob([vttContent], { type: 'text/vtt;charset=utf-8' });
-        const blobUrl = URL.createObjectURL(blob);
-
-        const trackLabel = `${item.LanguageName || item.Language} [Synced - ${item.Provider}]`;
-
-        const existingTracks = video.querySelectorAll('track');
-        existingTracks.forEach(t => {
-            if (t.label === trackLabel || t.getAttribute('data-subdl') === 'true') t.remove();
-        });
-
-        const track = document.createElement('track');
-        track.kind = 'subtitles';
-        track.label = trackLabel;
-        track.srclang = item.Language || 'und';
-        track.src = blobUrl;
-        track.default = true;
-        track.setAttribute('data-subdl', 'true');
-        if (streamIndex != null) {
-            track.setAttribute('data-index', String(streamIndex));
-        }
-
-        video.appendChild(track);
-
-        setTimeout(() => {
-            for (let i = 0; i < video.textTracks.length; i++) {
-                const tt = video.textTracks[i];
-                if (tt.label === trackLabel) {
-                    tt.mode = 'hidden';
-                }
-            }
-        }, 100);
-
-        console.log(`[SubtitleDownloader] Attached subtitle track "${trackLabel}" directly to active player.`);
     }
 
     function showToast(message) {
@@ -894,99 +540,36 @@
                         <div id="subdlMeta" class="subdl-subtitle-meta"></div>
                     </div>
                     <div class="subdl-header-actions">
-                        <button type="button" class="subdl-tab-btn active" id="subdlTabSearch">
-                            <span class="material-icons" style="font-size:16px;">search</span> Search
-                        </button>
-                        <button type="button" class="subdl-tab-btn" id="subdlTabPosition">
-                            <span class="material-icons" style="font-size:16px;">open_with</span> Position & Style
-                        </button>
                         <button type="button" class="subdl-close-btn" id="subdlBtnClose" title="Close">
                             <span class="material-icons">close</span>
                         </button>
                     </div>
                 </div>
 
-                <!-- Tab 1: Search View -->
-                <div id="subdlSearchView" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
-                    <div class="subdl-search-bar">
-                        <select id="subdlLangSelect" class="subdl-select-lang">
-                            ${SUPPORTED_LANGUAGES.map(l => `<option value="${l.code}" ${l.code === savedLang ? 'selected' : ''}>${l.name}</option>`).join('')}
-                        </select>
+                <div class="subdl-search-bar">
+                    <select id="subdlLangSelect" class="subdl-select-lang">
+                        ${SUPPORTED_LANGUAGES.map(l => `<option value="${l.code}" ${l.code === savedLang ? 'selected' : ''}>${l.name}</option>`).join('')}
+                    </select>
 
-                        <input type="text" id="subdlQueryInput" class="subdl-search-input" placeholder="Movie or Series title..." />
+                    <input type="text" id="subdlQueryInput" class="subdl-search-input" placeholder="Movie or Series title..." />
 
-                        <button type="button" id="subdlBtnSearch" class="subdl-search-btn">
-                            <span class="material-icons" style="font-size: 18px;">search</span>
-                            <span>Search</span>
-                        </button>
+                    <button type="button" id="subdlBtnSearch" class="subdl-search-btn">
+                        <span class="material-icons" style="font-size: 18px;">search</span>
+                        <span>Search</span>
+                    </button>
 
-                        <label class="subdl-sync-filter" title="Only display subtitles with exact file hash or release matching">
-                            <input type="checkbox" id="subdlSyncOnly" />
-                            <span>Sync Only</span>
-                        </label>
-                    </div>
-
-                    <div id="subdlResults" class="subdl-results-container"></div>
+                    <label class="subdl-sync-filter" title="Only display subtitles with exact file hash or release matching">
+                        <input type="checkbox" id="subdlSyncOnly" />
+                        <span>Sync Only</span>
+                    </label>
                 </div>
 
-                <!-- Tab 2: Position & Styling View -->
-                <div id="subdlPositionView" class="subdl-position-panel">
-                    <div class="subdl-pro-tip">
-                        <span class="material-icons" style="font-size: 20px;">touch_app</span>
-                        <div><strong>Interactive Drag & Drop:</strong> Hold the <strong>Alt</strong> key on your keyboard, then click and drag the subtitle anywhere on the video screen!</div>
-                    </div>
-
-                    <div class="subdl-setting-group">
-                        <div class="subdl-setting-title">
-                            <span class="material-icons" style="font-size: 18px;">vertical_align_bottom</span>
-                            <span>Position Presets</span>
-                        </div>
-                        <div class="subdl-presets-row">
-                            <button type="button" class="subdl-preset-btn" id="btnPresetBottom">Bottom (Default 88%)</button>
-                            <button type="button" class="subdl-preset-btn" id="btnPresetLowerThird">Lower-Third (78%)</button>
-                            <button type="button" class="subdl-preset-btn" id="btnPresetCenter">Center Screen (50%)</button>
-                            <button type="button" class="subdl-preset-btn" id="btnPresetTop">Top (10%)</button>
-                        </div>
-                    </div>
-
-                    <div class="subdl-setting-group">
-                        <div class="subdl-setting-title">
-                            <span class="material-icons" style="font-size: 18px;">tune</span>
-                            <span>Fine-tune Vertical Position</span>
-                        </div>
-                        <div class="subdl-slider-row">
-                            <input type="range" id="subdlPositionSlider" min="5" max="95" value="${posVertical}" />
-                            <span id="subdlPositionSliderValue" class="subdl-slider-value">${Math.round(posVertical)}%</span>
-                        </div>
-                    </div>
-
-                    <div class="subdl-setting-group">
-                        <div class="subdl-setting-title">
-                            <span class="material-icons" style="font-size: 18px;">format_size</span>
-                            <span>Subtitle Font Size</span>
-                        </div>
-                        <div class="subdl-presets-row" style="align-items:center;">
-                            <button type="button" class="subdl-preset-btn" id="btnFontSmaller">A- (Smaller)</button>
-                            <span id="subdlFontScaleValue" style="font-family:monospace;font-size:1rem;color:#38bdf8;padding:0 8px;">${Math.round(fontScale * 100)}%</span>
-                            <button type="button" class="subdl-preset-btn" id="btnFontLarger">A+ (Larger)</button>
-                            <button type="button" class="subdl-preset-btn" id="btnFontReset" style="margin-left:auto;">Reset to 100%</button>
-                        </div>
-                    </div>
-
-                    <div style="margin-top:12px;display:flex;justify-content:flex-end;">
-                        <button type="button" class="subdl-preset-btn" id="btnResetAllPosition" style="color:#ef4444;border-color:#ef4444;">
-                            Reset All to Factory Defaults
-                        </button>
-                    </div>
-                </div>
+                <div id="subdlResults" class="subdl-results-container"></div>
             </div>
         `;
 
         backdrop.onclick = closeModal;
         backdrop.querySelector('#subdlBtnClose').onclick = closeModal;
-
-        backdrop.querySelector('#subdlTabSearch').onclick = () => switchTab('search');
-        backdrop.querySelector('#subdlTabPosition').onclick = () => switchTab('position');
 
         backdrop.querySelector('#subdlBtnSearch').onclick = performSearch;
         backdrop.querySelector('#subdlQueryInput').onkeydown = (e) => {
@@ -997,27 +580,6 @@
         backdrop.querySelector('#subdlSyncOnly').onchange = () => {
             const syncOnly = backdrop.querySelector('#subdlSyncOnly').checked;
             renderResults(cachedSearchResults, syncOnly);
-        };
-
-        // Preset actions
-        backdrop.querySelector('#btnPresetBottom').onclick = () => setSubtitlePosition(88, 50);
-        backdrop.querySelector('#btnPresetLowerThird').onclick = () => setSubtitlePosition(78, 50);
-        backdrop.querySelector('#btnPresetCenter').onclick = () => setSubtitlePosition(50, 50);
-        backdrop.querySelector('#btnPresetTop').onclick = () => setSubtitlePosition(10, 50);
-
-        // Slider action
-        const slider = backdrop.querySelector('#subdlPositionSlider');
-        slider.oninput = (e) => setSubtitlePosition(parseFloat(e.target.value));
-
-        // Font scale actions
-        backdrop.querySelector('#btnFontSmaller').onclick = () => setFontScale(fontScale - 0.1);
-        backdrop.querySelector('#btnFontLarger').onclick = () => setFontScale(fontScale + 0.1);
-        backdrop.querySelector('#btnFontReset').onclick = () => setFontScale(1.0);
-
-        backdrop.querySelector('#btnResetAllPosition').onclick = () => {
-            setSubtitlePosition(88, 50);
-            setFontScale(1.0);
-            showToast('✓ Subtitle position & styling reset to defaults');
         };
 
         document.body.appendChild(backdrop);
