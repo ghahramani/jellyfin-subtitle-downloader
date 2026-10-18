@@ -103,7 +103,7 @@
         return null;
     }
 
-    // Check and handle auto-selection / auto-resume after reload
+    // Check and handle auto-selection / auto-resume after reload or playback changes
     function checkPendingSubtitleSelection() {
         const pendingRaw = sessionStorage.getItem('subdl_pending_selection');
         if (!pendingRaw) return;
@@ -125,16 +125,31 @@
         const pm = getPlaybackManager();
         const player = getActivePlayer();
 
-        // If player is not currently active, auto-resume playback
+        // If player is NOT currently active (e.g. user reloaded and landed on home page):
+        // Resume playing the exact item from the exact same moment
         if (!player && pm && typeof pm.play === 'function') {
-            console.log('[SubtitleDownloader] Auto-resuming playback after reload for item:', pending.itemId);
-            // Update timestamp to give player time to spin up
-            pending.timestamp = Date.now();
-            sessionStorage.setItem('subdl_pending_selection', JSON.stringify(pending));
+            const serverId = pending.serverId || (window.ApiClient ? window.ApiClient.serverId() : '');
+            console.log('[SubtitleDownloader] Auto-resuming video after reload from same moment:', pending.itemId, pending.startPositionTicks);
 
-            pm.play({
+            sessionStorage.removeItem('subdl_pending_selection');
+
+            const playOptions = {
                 ids: [pending.itemId],
-                startPositionTicks: pending.startPositionTicks || 0
+                serverId: serverId,
+                startPositionTicks: pending.startPositionTicks || 0,
+                fullscreen: true
+            };
+            if (pending.item) {
+                playOptions.items = [pending.item];
+            }
+            if (pending.streamIndex != null && pending.streamIndex >= 0) {
+                playOptions.subtitleStreamIndex = pending.streamIndex;
+            }
+
+            pm.play(playOptions).then(() => {
+                console.log('[SubtitleDownloader] Resume playback initiated successfully.');
+            }).catch(err => {
+                console.error('[SubtitleDownloader] Error resuming playback:', err);
             });
             return;
         }
@@ -148,22 +163,25 @@
 
             if (Array.isArray(streams) && streams.length > 0) {
                 const targetLang = (pending.language || '').toLowerCase();
+                const targetIndex = pending.streamIndex;
                 const targetPath = (pending.savedFilePath || '').toLowerCase();
 
                 // Find matching subtitle stream
-                const match = streams.find(s =>
-                    s.Type === 'Subtitle' &&
-                    (
-                        (targetPath && s.Path && s.Path.toLowerCase() === targetPath) ||
+                const match = (targetIndex != null && streams.find(s => s.Type === 'Subtitle' && s.Index === targetIndex)) ||
+                    streams.find(s =>
+                        s.Type === 'Subtitle' &&
+                        (
+                            (targetPath && s.Path && s.Path.toLowerCase() === targetPath) ||
+                            ((s.Language && s.Language.toLowerCase().startsWith(targetLang)) ||
+                             (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang))) &&
+                            (s.IsExternal || (s.Path && s.Path.endsWith('.srt')))
+                        )
+                    ) ||
+                    streams.find(s =>
+                        s.Type === 'Subtitle' &&
                         ((s.Language && s.Language.toLowerCase().startsWith(targetLang)) ||
-                         (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang))) &&
-                        (s.IsExternal || (s.Path && s.Path.endsWith('.srt')))
-                    )
-                ) || streams.find(s =>
-                    s.Type === 'Subtitle' &&
-                    ((s.Language && s.Language.toLowerCase().startsWith(targetLang)) ||
-                     (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang)))
-                );
+                         (s.LanguageCode && s.LanguageCode.toLowerCase().startsWith(targetLang)))
+                    );
 
                 if (match && typeof pm.setSubtitleStreamIndex === 'function') {
                     console.log('[SubtitleDownloader] Auto-selecting new subtitle stream index:', match.Index, match.DisplayTitle);
@@ -189,9 +207,9 @@
         observer.observe(document.body, { childList: true, subtree: true });
 
         attachPlayerControls();
-        setTimeout(checkPendingSubtitleSelection, 500);
-        setTimeout(checkPendingSubtitleSelection, 1500);
-        setTimeout(checkPendingSubtitleSelection, 3000);
+        setTimeout(checkPendingSubtitleSelection, 300);
+        setTimeout(checkPendingSubtitleSelection, 1000);
+        setTimeout(checkPendingSubtitleSelection, 2500);
     }
 
     function getActiveButtonsBar() {
@@ -464,31 +482,75 @@
                 <span>Downloaded!</span>
             `;
 
-            showToast(`✓ Subtitle downloaded! Refreshing player...`);
-
             // Capture current playback tick position and item details
             const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
-            const startPositionTicks = (video && video.currentTime)
+            const currentTicks = (video && video.currentTime)
                 ? Math.floor(video.currentTime * 10000000)
                 : 0;
 
+            const pm = getPlaybackManager();
+            const player = getActivePlayer();
+            const serverId = currentItemData.ServerId || (window.ApiClient ? window.ApiClient.serverId() : '');
+
+            // Store in sessionStorage with full details in case user reloads the browser
             try {
                 sessionStorage.setItem('subdl_pending_selection', JSON.stringify({
                     itemId: currentItemData.Id,
+                    item: currentItemData,
+                    serverId: serverId,
+                    startPositionTicks: currentTicks,
+                    streamIndex: response.StreamIndex,
                     language: item.Language || response.Language || 'en',
                     languageName: item.LanguageName || item.Language,
                     savedFilePath: response.FilePath || '',
-                    startPositionTicks: startPositionTicks,
                     timestamp: Date.now()
                 }));
             } catch (storageErr) {
                 console.warn('[SubtitleDownloader] sessionStorage error:', storageErr);
             }
 
-            // Refresh page after short delay so user sees confirmation and server file write finishes
-            setTimeout(() => {
-                window.location.reload();
-            }, 800);
+            closeModal();
+            showToast(`✓ Subtitle downloaded! Playing from current position...`);
+
+            // Fetch fresh item metadata from server so updated media streams are known
+            let targetItem = currentItemData;
+            if (window.ApiClient && currentItemData?.Id) {
+                try {
+                    targetItem = await window.ApiClient.getItem(window.ApiClient.getCurrentUserId(), currentItemData.Id) || currentItemData;
+                } catch (e) {}
+            }
+
+            // Resume playback of the exact video from the exact same moment without reloading page
+            if (pm && typeof pm.play === 'function') {
+                console.log('[SubtitleDownloader] In-player resume from moment:', currentTicks, 'with subtitle index:', response.StreamIndex);
+
+                const playOptions = {
+                    items: [targetItem],
+                    ids: [targetItem.Id],
+                    serverId: serverId,
+                    startPositionTicks: currentTicks,
+                    fullscreen: true
+                };
+
+                if (response.StreamIndex != null && response.StreamIndex >= 0) {
+                    playOptions.subtitleStreamIndex = response.StreamIndex;
+                }
+
+                pm.play(playOptions).then(() => {
+                    console.log('[SubtitleDownloader] Play resumed successfully at moment:', currentTicks);
+                    // Ensure the downloaded subtitle stream is selected
+                    if (response.StreamIndex != null && response.StreamIndex >= 0) {
+                        setTimeout(() => {
+                            const curPlayer = getActivePlayer();
+                            if (curPlayer && typeof pm.setSubtitleStreamIndex === 'function') {
+                                pm.setSubtitleStreamIndex(response.StreamIndex, curPlayer);
+                            }
+                        }, 600);
+                    }
+                }).catch(err => {
+                    console.warn('[SubtitleDownloader] In-player resume error:', err);
+                });
+            }
 
         } catch (ex) {
             btnElement.disabled = false;
