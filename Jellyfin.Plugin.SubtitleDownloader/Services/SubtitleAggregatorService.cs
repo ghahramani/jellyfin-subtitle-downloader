@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -9,16 +10,39 @@ using Jellyfin.Plugin.SubtitleDownloader.Providers;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.SubtitleDownloader.Services;
 
 /// <summary>
+/// Cached in-memory entry for fast streaming of downloaded subtitles as .js TrackEvents and .vtt.
+/// </summary>
+public class SubtitleStreamCacheEntry
+{
+    public string DownloadId { get; set; } = string.Empty;
+
+    public string SrtContent { get; set; } = string.Empty;
+
+    public string VttContent { get; set; } = string.Empty;
+
+    public List<SubtitleTrackEventDto> TrackEvents { get; set; } = new();
+
+    public string Language { get; set; } = "und";
+
+    public string? FilePath { get; set; }
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
 /// Orchestrates multi-provider search, ranking, downloading, charset conversion, and saving to media folder.
 /// </summary>
 public class SubtitleAggregatorService
 {
+    private static readonly ConcurrentDictionary<string, SubtitleStreamCacheEntry> _streamCache = new();
+
     private readonly IEnumerable<ISubtitleSourceProvider> _providers;
     private readonly ILibraryManager _libraryManager;
     private readonly IProviderManager _providerManager;
@@ -37,6 +61,24 @@ public class SubtitleAggregatorService
         _providerManager = providerManager;
         _fileSystem = fileSystem;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Retrieves a cached subtitle stream by download ID.
+    /// </summary>
+    public SubtitleStreamCacheEntry? GetCachedStream(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return null;
+        }
+
+        if (_streamCache.TryGetValue(id, out var entry))
+        {
+            return entry;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -78,7 +120,7 @@ public class SubtitleAggregatorService
     }
 
     /// <summary>
-    /// Downloads, converts to UTF-8/WebVTT, saves beside media file, and triggers library refresh.
+    /// Downloads, converts to UTF-8/WebVTT, caches for live streaming, saves beside media file, and triggers library refresh.
     /// </summary>
     public async Task<DownloadSubtitleResponse> DownloadAndApplyAsync(DownloadSubtitleRequest request, CancellationToken cancellationToken)
     {
@@ -129,9 +171,14 @@ public class SubtitleAggregatorService
         // 3. Decode to clean UTF-8 string (fixing Persian Windows-1256, ISO-8859, etc.)
         string srtText = SubtitleFormatConverter.DecodeBytesToUtf8(rawBytes, request.Language);
         string vttText = SubtitleFormatConverter.ConvertSrtToVtt(srtText);
+        var trackEvents = SubtitleFormatConverter.ParseSrtToTrackEvents(srtText);
 
+        string downloadId = Guid.NewGuid().ToString("N");
         string? savedFilePath = null;
         string fileName = $"{request.Language}.srt";
+        int? discoveredIndex = null;
+
+        var videoItem = _libraryManager.GetItemById(request.ItemId) as Video;
 
         // 4. Save to media file folder if configured
         var config = Plugin.Instance?.Configuration;
@@ -139,14 +186,13 @@ public class SubtitleAggregatorService
         {
             try
             {
-                var item = _libraryManager.GetItemById(request.ItemId) as Video;
-                if (item != null && !string.IsNullOrEmpty(item.Path) && File.Exists(item.Path))
+                if (videoItem != null && !string.IsNullOrEmpty(videoItem.Path) && File.Exists(videoItem.Path))
                 {
-                    string dir = Path.GetDirectoryName(item.Path)!;
-                    string baseName = Path.GetFileNameWithoutExtension(item.Path);
+                    string dir = Path.GetDirectoryName(videoItem.Path)!;
+                    string baseName = Path.GetFileNameWithoutExtension(videoItem.Path);
                     string targetFile = Path.Combine(dir, $"{baseName}.{request.Language}.srt");
 
-                    // If file exists, try appending provider or default
+                    // If file exists, try appending provider
                     if (File.Exists(targetFile))
                     {
                         targetFile = Path.Combine(dir, $"{baseName}.{request.Language}.{provider.Name.ToLowerInvariant()}.srt");
@@ -158,11 +204,30 @@ public class SubtitleAggregatorService
 
                     _logger.LogInformation("Saved downloaded subtitle to {Path}", targetFile);
 
-                    // Refresh item metadata
-                    _providerManager.QueueRefresh(
-                        item.Id,
-                        new MetadataRefreshOptions(new DirectoryService(_fileSystem)),
-                        RefreshPriority.High);
+                    // Refresh item metadata synchronously & queue provider manager refresh
+                    try
+                    {
+                        var refreshOptions = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+                        {
+                            MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                            ImageRefreshMode = MetadataRefreshMode.None
+                        };
+
+                        await videoItem.RefreshMetadata(refreshOptions, cancellationToken).ConfigureAwait(false);
+                        _providerManager.QueueRefresh(videoItem.Id, refreshOptions, RefreshPriority.High);
+
+                        // Check if refreshed item now has the newly detected subtitle stream
+                        var streams = videoItem.GetMediaStreams();
+                        var subStream = streams?.FirstOrDefault(s => s.Type == MediaStreamType.Subtitle && s.Path == savedFilePath);
+                        if (subStream != null)
+                        {
+                            discoveredIndex = subStream.Index;
+                        }
+                    }
+                    catch (Exception refEx)
+                    {
+                        _logger.LogWarning(refEx, "Metadata refresh encountered a minor issue for {ItemId}", videoItem.Id);
+                    }
                 }
             }
             catch (Exception ex)
@@ -171,16 +236,32 @@ public class SubtitleAggregatorService
             }
         }
 
+        // 5. Store in memory cache for streaming
+        var cacheEntry = new SubtitleStreamCacheEntry
+        {
+            DownloadId = downloadId,
+            SrtContent = srtText,
+            VttContent = vttText,
+            TrackEvents = trackEvents,
+            Language = request.Language,
+            FilePath = savedFilePath
+        };
+        _streamCache[downloadId] = cacheEntry;
+
         return new DownloadSubtitleResponse
         {
             Success = true,
             Message = "Subtitle downloaded and ready to display in player.",
+            DownloadId = downloadId,
             SubtitleText = srtText,
             VttContent = vttText,
+            TrackEvents = trackEvents,
             FileName = fileName,
             FilePath = savedFilePath,
             Language = request.Language,
-            Provider = provider.Name
+            LanguageName = provider.Name,
+            Provider = provider.Name,
+            StreamIndex = discoveredIndex
         };
     }
 

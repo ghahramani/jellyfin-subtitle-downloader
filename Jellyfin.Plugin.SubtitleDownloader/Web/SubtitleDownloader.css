@@ -601,3 +601,11 @@
     opacity: 1;
     transform: translateX(-50%) translateY(0);
 }
+
+/* Suppress duplicate browser native cues when SubtitleDownloader overlay is active */
+video::cue {
+    opacity: 0 !important;
+    background: transparent !important;
+    color: transparent !important;
+    text-shadow: none !important;
+}

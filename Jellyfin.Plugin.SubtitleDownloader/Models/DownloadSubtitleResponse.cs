@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Jellyfin.Plugin.SubtitleDownloader.Models;
 
 /// <summary>
@@ -8,6 +10,12 @@ public class DownloadSubtitleResponse
     public bool Success { get; set; }
 
     public string Message { get; set; } = string.Empty;
+
+    public string DownloadId { get; set; } = string.Empty;
+
+    public int? StreamIndex { get; set; }
+
+    public string? DeliveryUrl { get; set; }
 
     public string? SubtitleText { get; set; }
 
@@ -22,4 +30,6 @@ public class DownloadSubtitleResponse
     public string? LanguageName { get; set; }
 
     public string? Provider { get; set; }
+
+    public List<SubtitleTrackEventDto> TrackEvents { get; set; } = new();
 }

@@ -242,4 +242,55 @@ public class SubtitleDownloaderController : ControllerBase
             return StatusCode(500, new { success = false, message = ex.Message });
         }
     }
+
+    /// <summary>
+    /// Serves subtitle cues in Jellyfin's TrackEvents JSON format (.js) for HtmlVideoPlayer.
+    /// </summary>
+    [HttpGet("Stream/{id}/subtitles.js")]
+    [HttpGet("Stream.js")]
+    [AllowAnonymous]
+    public ActionResult GetSubtitleStreamJs([FromRoute] string? id, [FromQuery(Name = "id")] string? queryId)
+    {
+        string actualId = !string.IsNullOrWhiteSpace(id) ? id : (queryId ?? string.Empty);
+        var entry = _aggregatorService.GetCachedStream(actualId);
+        if (entry == null)
+        {
+            return NotFound(new { message = $"Subtitle stream {actualId} not found or expired." });
+        }
+
+        return Ok(new { TrackEvents = entry.TrackEvents });
+    }
+
+    /// <summary>
+    /// Serves WebVTT format (.vtt) for native HTML5 video and web players.
+    /// </summary>
+    [HttpGet("Stream/{id}/subtitles.vtt")]
+    [HttpGet("Stream.vtt")]
+    [AllowAnonymous]
+    public ActionResult GetSubtitleStreamVtt([FromRoute] string? id, [FromQuery(Name = "id")] string? queryId)
+    {
+        string actualId = !string.IsNullOrWhiteSpace(id) ? id : (queryId ?? string.Empty);
+        var entry = _aggregatorService.GetCachedStream(actualId);
+        if (entry == null)
+        {
+            return NotFound("Subtitle stream not found.");
+        }
+
+        return Content(entry.VttContent, "text/vtt; charset=utf-8");
+    }
+
+    /// <summary>
+    /// Serves either TrackEvents JSON or WebVTT based on requested format parameter.
+    /// </summary>
+    [HttpGet("Stream")]
+    [AllowAnonymous]
+    public ActionResult GetSubtitleStream([FromQuery] string id, [FromQuery] string? format)
+    {
+        if (string.Equals(format, "js", StringComparison.OrdinalIgnoreCase))
+        {
+            return GetSubtitleStreamJs(null, id);
+        }
+
+        return GetSubtitleStreamVtt(null, id);
+    }
 }

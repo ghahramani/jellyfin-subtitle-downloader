@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using Jellyfin.Plugin.SubtitleDownloader.Models;
 
 namespace Jellyfin.Plugin.SubtitleDownloader.Services;
 
@@ -141,5 +143,74 @@ public static class SubtitleFormatConverter
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Parses SRT or WebVTT content into Jellyfin-compatible TrackEvents.
+    /// </summary>
+    public static List<SubtitleTrackEventDto> ParseSrtToTrackEvents(string content)
+    {
+        var events = new List<SubtitleTrackEventDto>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return events;
+        }
+
+        using var reader = new StringReader(content);
+        string? line;
+        int eventCounter = 1;
+
+        while ((line = reader.ReadLine()) != null)
+        {
+            line = line.Trim();
+            if (string.IsNullOrEmpty(line))
+            {
+                continue;
+            }
+
+            // Match timestamp line (handles both comma and dot for milliseconds)
+            var match = Regex.Match(line, @"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})");
+            if (match.Success)
+            {
+                long startTicks = ParseTimestampToTicks(match.Groups[1].Value, match.Groups[2].Value, match.Groups[3].Value, match.Groups[4].Value);
+                long endTicks = ParseTimestampToTicks(match.Groups[5].Value, match.Groups[6].Value, match.Groups[7].Value, match.Groups[8].Value);
+
+                var textSb = new StringBuilder();
+                string? textLine;
+                while ((textLine = reader.ReadLine()) != null)
+                {
+                    if (string.IsNullOrWhiteSpace(textLine))
+                    {
+                        break;
+                    }
+                    if (textSb.Length > 0)
+                    {
+                        textSb.Append('\n');
+                    }
+                    textSb.Append(textLine.TrimEnd());
+                }
+
+                events.Add(new SubtitleTrackEventDto
+                {
+                    Id = eventCounter.ToString(),
+                    StartPositionTicks = startTicks,
+                    EndPositionTicks = endTicks,
+                    Text = textSb.ToString()
+                });
+                eventCounter++;
+            }
+        }
+
+        return events;
+    }
+
+    private static long ParseTimestampToTicks(string h, string m, string s, string ms)
+    {
+        int hours = int.Parse(h);
+        int minutes = int.Parse(m);
+        int seconds = int.Parse(s);
+        int millis = int.Parse(ms);
+        TimeSpan span = new TimeSpan(0, hours, minutes, seconds, millis);
+        return span.Ticks;
     }
 }

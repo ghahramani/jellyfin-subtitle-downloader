@@ -38,11 +38,131 @@
     let isDragging = false;
     let activeCueText = '';
 
+    // =========================================================
+    // Jellyfin Web & PlaybackManager Integration
+    // =========================================================
+    function getPlaybackManager() {
+        if (window.playbackManager) {
+            return window.playbackManager;
+        }
+
+        if (window.webpackChunk) {
+            try {
+                window.webpackChunk.push([
+                    ['subdl_probe_' + Math.random().toString(36).substring(7)],
+                    {},
+                    function (req) {
+                        if (req && req.c) {
+                            for (const id in req.c) {
+                                const exp = req.c[id]?.exports;
+                                if (!exp) continue;
+                                if (exp.f && typeof exp.f.subtitleTracks === 'function' && typeof exp.f.getCurrentPlayer === 'function') {
+                                    window.playbackManager = exp.f;
+                                    break;
+                                }
+                                if (exp.default && typeof exp.default.subtitleTracks === 'function' && typeof exp.default.getCurrentPlayer === 'function') {
+                                    window.playbackManager = exp.default;
+                                    break;
+                                }
+                                if (typeof exp.subtitleTracks === 'function' && typeof exp.getCurrentPlayer === 'function') {
+                                    window.playbackManager = exp;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!window.playbackManager && typeof req === 'function') {
+                            try {
+                                const m = req(68221);
+                                if (m?.f && typeof m.f.subtitleTracks === 'function') {
+                                    window.playbackManager = m.f;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                ]);
+            } catch (e) {
+                console.warn('[SubtitleDownloader] Could not resolve playbackManager from webpack:', e);
+            }
+        }
+
+        return window.playbackManager || null;
+    }
+
+    function getActivePlayer() {
+        const pm = getPlaybackManager();
+        if (pm && typeof pm.getCurrentPlayer === 'function') {
+            const p = pm.getCurrentPlayer();
+            if (p) return p;
+        }
+        return window.activeJellyfinPlayer || null;
+    }
+
+    function getActiveMediaSource() {
+        const pm = getPlaybackManager();
+        const player = getActivePlayer();
+        if (pm && player && typeof pm.currentMediaSource === 'function') {
+            try {
+                const ms = pm.currentMediaSource(player);
+                if (ms) return ms;
+            } catch (e) {}
+        }
+        if (player?._currentPlayOptions?.mediaSource) {
+            return player._currentPlayOptions.mediaSource;
+        }
+        return null;
+    }
+
+    function hookPlaybackManager() {
+        const pm = getPlaybackManager();
+        if (!pm || pm._subdlHooked) return;
+        pm._subdlHooked = true;
+
+        const originalSetSubtitle = pm.setSubtitleStreamIndex.bind(pm);
+        pm.setSubtitleStreamIndex = function (index, player) {
+            const result = originalSetSubtitle(index, player);
+
+            // Sync text track states with the video element
+            const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
+            if (video) {
+                const tracks = video.querySelectorAll('track[data-subdl="true"]');
+                tracks.forEach(tr => {
+                    for (let i = 0; i < video.textTracks.length; i++) {
+                        const tt = video.textTracks[i];
+                        if (tt.label === tr.label) {
+                            tt.mode = (index === -1) ? 'disabled' : 'hidden';
+                        }
+                    }
+                });
+            }
+
+            if (index === -1) {
+                activeCueText = '';
+                const textEl = document.getElementById('subdlSubtitleText');
+                if (textEl && !isAltDown) {
+                    textEl.innerHTML = '';
+                }
+            }
+
+            return result;
+        };
+    }
+
     // Observe player buttons bar
     function initObserver() {
+        hookPlaybackManager();
+
+        if (window.Events) {
+            window.Events.on(window, 'playerchange', hookPlaybackManager);
+            window.Events.on(window, 'playbackstart', () => {
+                hookPlaybackManager();
+                ensureSubtitleOverlay();
+            });
+        }
+
         const observer = new MutationObserver(() => {
             attachPlayerControls();
             ensureSubtitleOverlay();
+            hookPlaybackManager();
         });
         observer.observe(document.body, { childList: true, subtree: true });
 
@@ -282,6 +402,9 @@
     }
 
     function hookVideoTracks(video) {
+        if (!video || video._subdlHooked) return;
+        video._subdlHooked = true;
+
         function checkActiveCues() {
             let foundText = '';
             for (let i = 0; i < video.textTracks.length; i++) {
@@ -314,6 +437,17 @@
     // Modal & In-Player UI
     // =========================================================
     async function getCurrentPlayingItem() {
+        const pm = getPlaybackManager();
+        const player = getActivePlayer();
+        if (pm && player && typeof pm.currentItem === 'function') {
+            try {
+                const cur = pm.currentItem(player);
+                if (cur && cur.Id) {
+                    return cur;
+                }
+            } catch (e) {}
+        }
+
         let itemId = document.querySelector('.btnUserRating')?.getAttribute('data-id');
 
         if (!itemId && window.ApiClient) {
@@ -547,8 +681,11 @@
                 throw new Error(response.Message || 'Download failed');
             }
 
-            // Apply subtitle directly into active HTML5 video element
-            applySubtitleToPlayer(response, item);
+            // 1. Register subtitle into Jellyfin native CC menu and playbackManager
+            const streamIndex = registerSubtitleInNativeMenu(response, item);
+
+            // 2. Apply subtitle directly to active HTML5 video element and overlay
+            applySubtitleToPlayer(response, item, streamIndex);
 
             btnElement.className = 'subdl-download-btn applied';
             btnElement.innerHTML = `
@@ -573,7 +710,110 @@
         }
     }
 
-    function applySubtitleToPlayer(downloadResponse, item) {
+    function registerSubtitleInNativeMenu(response, item) {
+        try {
+            const pm = getPlaybackManager();
+            const player = getActivePlayer();
+            const mediaSource = getActiveMediaSource();
+
+            if (!mediaSource) {
+                console.warn('[SubtitleDownloader] No active mediaSource found to register subtitle stream.');
+                return null;
+            }
+
+            if (!Array.isArray(mediaSource.MediaStreams)) {
+                mediaSource.MediaStreams = [];
+            }
+
+            const langCode = response.Language || item.Language || 'und';
+            const langName = item.LanguageName || item.Language || 'Unknown';
+            const displayTitle = `${langName} [Synced - ${item.Provider}]`;
+            const deliveryUrl = window.ApiClient.getUrl(`SubtitleDownloader/Stream/${response.DownloadId}/subtitles.vtt`);
+
+            // Compute unique stream index
+            const existingIndices = mediaSource.MediaStreams
+                .map(s => typeof s.Index === 'number' ? s.Index : -1)
+                .filter(idx => idx >= 0);
+            const maxIdx = existingIndices.length > 0 ? Math.max(...existingIndices) : 0;
+            const streamIndex = (response.StreamIndex != null && response.StreamIndex >= 0)
+                ? response.StreamIndex
+                : Math.max(100, maxIdx + 1);
+
+            let stream = mediaSource.MediaStreams.find(s =>
+                s.Index === streamIndex ||
+                (s.Type === 'Subtitle' && s.DeliveryUrl && s.DeliveryUrl.includes(response.DownloadId))
+            );
+
+            if (!stream) {
+                stream = {
+                    Index: streamIndex,
+                    Type: "Subtitle",
+                    Codec: "subrip",
+                    Language: langCode,
+                    LanguageCode: langCode,
+                    DisplayTitle: displayTitle,
+                    DisplayLanguage: langName,
+                    Title: `[Synced - ${item.Provider}]`,
+                    IsExternal: true,
+                    IsExternalUrl: true,
+                    DeliveryMethod: "External",
+                    DeliveryUrl: deliveryUrl,
+                    IsTextSubtitleStream: true,
+                    SupportsExternalStream: true,
+                    Score: 100
+                };
+                mediaSource.MediaStreams.push(stream);
+            } else {
+                stream.DisplayTitle = displayTitle;
+                stream.DeliveryUrl = deliveryUrl;
+                stream.Index = streamIndex;
+            }
+
+            // Sync with player._currentPlayOptions if separate object
+            if (player?._currentPlayOptions?.mediaSource?.MediaStreams &&
+                player._currentPlayOptions.mediaSource !== mediaSource) {
+                const pStreams = player._currentPlayOptions.mediaSource.MediaStreams;
+                if (!pStreams.find(s => s.Index === stream.Index)) {
+                    pStreams.push(stream);
+                }
+            }
+
+            // Unhide native CC button on player bar
+            const btnSubtitles = document.querySelector('.btnSubtitles');
+            if (btnSubtitles) {
+                btnSubtitles.classList.remove('hide');
+                btnSubtitles.disabled = false;
+            }
+
+            // Switch to the newly registered track in playbackManager
+            if (pm && player && typeof pm.setSubtitleStreamIndex === 'function') {
+                try {
+                    pm.setSubtitleStreamIndex(stream.Index, player);
+                    console.log(`[SubtitleDownloader] setSubtitleStreamIndex(${stream.Index}) successfully called.`);
+                } catch (err) {
+                    console.warn('[SubtitleDownloader] pm.setSubtitleStreamIndex error:', err);
+                    if (typeof player.setSubtitleStreamIndex === 'function') {
+                        player.setSubtitleStreamIndex(stream.Index);
+                    }
+                }
+            }
+
+            // Trigger mediastreamschange so the OSD and subtitle dialog update immediately
+            if (window.Events && player) {
+                try {
+                    window.Events.trigger(player, 'mediastreamschange');
+                } catch (e) {}
+            }
+
+            console.log(`[SubtitleDownloader] Subtitle "${displayTitle}" (Index ${stream.Index}) registered into Jellyfin native CC menu.`);
+            return stream.Index;
+        } catch (err) {
+            console.error('[SubtitleDownloader] Failed to register subtitle in native menu:', err);
+            return null;
+        }
+    }
+
+    function applySubtitleToPlayer(downloadResponse, item, streamIndex) {
         const video = document.querySelector('video') || document.querySelector('.htmlvideoplayer');
         if (!video) return;
 
@@ -587,15 +827,19 @@
 
         const existingTracks = video.querySelectorAll('track');
         existingTracks.forEach(t => {
-            if (t.label === trackLabel) t.remove();
+            if (t.label === trackLabel || t.getAttribute('data-subdl') === 'true') t.remove();
         });
 
         const track = document.createElement('track');
         track.kind = 'subtitles';
         track.label = trackLabel;
-        track.srclang = item.Language;
+        track.srclang = item.Language || 'und';
         track.src = blobUrl;
         track.default = true;
+        track.setAttribute('data-subdl', 'true');
+        if (streamIndex != null) {
+            track.setAttribute('data-index', String(streamIndex));
+        }
 
         video.appendChild(track);
 
@@ -603,7 +847,7 @@
             for (let i = 0; i < video.textTracks.length; i++) {
                 const tt = video.textTracks[i];
                 if (tt.label === trackLabel) {
-                    tt.mode = 'showing';
+                    tt.mode = 'hidden';
                 }
             }
         }, 100);
