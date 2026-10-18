@@ -1,0 +1,14 @@
+{
+  "category": "Subtitles",
+  "guid": "3f8c8710-4139-4d69-a1d2-06b3a32f6b89",
+  "name": "Subtitle Downloader",
+  "description": "In-player subtitle search, sync matching, and downloading across multiple providers (OpenSubtitles, SubDL, Podnapisi, and Jellyfin).",
+  "overview": "Adds a download subtitle button directly to the video player with exact sync hash matching and multi-provider support.",
+  "owner": "Navid",
+  "targetAbi": "12.0",
+  "timestamp": "2026-10-18T19:00:00.0000000Z",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": []
+}

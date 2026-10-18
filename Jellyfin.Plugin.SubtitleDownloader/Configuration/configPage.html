@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Subtitle Downloader Configuration</title>
+</head>
+<body>
+    <div id="SubtitleDownloaderConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox,emby-select">
+        <link rel="stylesheet" href="SubtitleDownloader/ClientStyle" />
+
+        <div data-role="content">
+            <div class="content-primary">
+                <h1>Subtitle Downloader Settings</h1>
+                <p class="subdl-help-text" style="font-size: 1rem; margin-bottom: 24px;">
+                    Configure subtitle sources (API keys and free providers) for in-player synchronization and subtitle downloading.
+                </p>
+
+                <form id="subtitleDownloaderForm">
+                    <!-- General Preferences Card -->
+                    <div class="subdl-config-card">
+                        <h2 class="subdl-header-title">
+                            <span class="material-icons">tune</span>
+                            General Preferences
+                        </h2>
+
+                        <div class="subdl-input-container">
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtPreferredLanguages">Preferred Languages</label>
+                                <input is="emby-input" type="text" id="txtPreferredLanguages" label="Preferred Languages" />
+                                <div class="fieldDescription">Comma-separated language codes, e.g. <code>en,fa,es,fr</code>. These appear at the top of the in-player language selector.</div>
+                            </div>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkSaveToMediaDirectory" />
+                                <span>Save downloaded subtitles beside video file in media library (e.g. <code>Movie.en.srt</code>)</span>
+                            </label>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkHighlightSyncMatches" />
+                                <span>Highlight exact hash & release sync matches in player</span>
+                            </label>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkDisableScriptInjectionMiddleware" />
+                                <span>Disable request-time script injection middleware (advanced users only)</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- OpenSubtitles.com Card -->
+                    <div class="subdl-config-card">
+                        <h2 class="subdl-header-title">
+                            <span class="material-icons">cloud_download</span>
+                            OpenSubtitles.com REST API
+                            <span class="subdl-badge">Recommended</span>
+                        </h2>
+                        <p class="subdl-help-text">
+                            Provides file hash matching for 100% exact video synchronization. A default Jellyfin client key is included, or you can provide your own personal/VIP API key.
+                        </p>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkOpenSubtitlesEnabled" />
+                                <span>Enable OpenSubtitles Provider</span>
+                            </label>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtOpenSubtitlesApiKey">API Key</label>
+                                <input is="emby-input" type="text" id="txtOpenSubtitlesApiKey" label="API Key" />
+                                <div class="fieldDescription">Get your free API key at <a href="https://www.opensubtitles.com/en/consumers" target="_blank" rel="noopener noreferrer">opensubtitles.com/en/consumers</a>.</div>
+                            </div>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtOpenSubtitlesUsername">Username (Optional)</label>
+                                <input is="emby-input" type="text" id="txtOpenSubtitlesUsername" label="Username (Optional)" />
+                                <div class="fieldDescription">OpenSubtitles account username (optional for VIP or personal download limits).</div>
+                            </div>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtOpenSubtitlesPassword">Password (Optional)</label>
+                                <input is="emby-input" type="password" id="txtOpenSubtitlesPassword" label="Password (Optional)" />
+                            </div>
+                        </div>
+
+                        <div class="subdl-actions-row">
+                            <button is="emby-button" type="button" class="raised" id="btnTestOpenSubtitles">
+                                <span>Test Connection</span>
+                            </button>
+                        </div>
+                        <div id="testResultOpenSubtitles" class="subdl-test-result"></div>
+                    </div>
+
+                    <!-- SubDL Card -->
+                    <div class="subdl-config-card">
+                        <h2 class="subdl-header-title">
+                            <span class="material-icons">subtitles</span>
+                            SubDL
+                            <span class="subdl-badge free">Free API</span>
+                        </h2>
+                        <p class="subdl-help-text">
+                            Extensive database of subtitles with release-group syncing (YTS, RARBG, PSA, WEB-DL, BluRay) and strong Persian/Arabic & international coverage.
+                        </p>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkSubdlEnabled" />
+                                <span>Enable SubDL Provider</span>
+                            </label>
+                        </div>
+
+                        <div class="subdl-input-container">
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtSubdlApiKey">SubDL API Key</label>
+                                <input is="emby-input" type="text" id="txtSubdlApiKey" label="SubDL API Key" />
+                                <div class="fieldDescription">Get a free SubDL API key instantly by registering at <a href="https://subdl.com" target="_blank" rel="noopener noreferrer">subdl.com</a>.</div>
+                            </div>
+                        </div>
+
+                        <div class="subdl-actions-row">
+                            <button is="emby-button" type="button" class="raised" id="btnTestSubdl">
+                                <span>Test Connection</span>
+                            </button>
+                        </div>
+                        <div id="testResultSubdl" class="subdl-test-result"></div>
+                    </div>
+
+                    <!-- Jellyfin Built-in Subtitle Providers Card -->
+                    <div class="subdl-config-card">
+                        <h2 class="subdl-header-title">
+                            <span class="material-icons">dns</span>
+                            Jellyfin Native Providers
+                        </h2>
+                        <p class="subdl-help-text">
+                            Queries any subtitle providers and plugins already configured within Jellyfin Server (e.g. OpenSubtitles plugin, SubtitleEdit, etc.).
+                        </p>
+
+                        <div class="subdl-input-container">
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="chkJellyfinInternalEnabled" />
+                                <span>Enable Jellyfin Built-in Subtitle Providers</span>
+                            </label>
+                        </div>
+
+                        <div class="subdl-actions-row">
+                            <button is="emby-button" type="button" class="raised" id="btnTestJellyfin">
+                                <span>Test Subtitle System</span>
+                            </button>
+                        </div>
+                        <div id="testResultJellyfin" class="subdl-test-result"></div>
+                    </div>
+
+                    <!-- Submit / Save Button -->
+                    <div style="margin-top: 32px; display: flex; align-items: center; gap: 16px;">
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save Configuration</span>
+                        </button>
+                        <span id="saveStatus" style="font-weight: 500; color: #10b981;"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                var pluginId = "3f8c8710-4139-4d69-a1d2-06b3a32f6b89";
+
+                function loadConfig(page) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.ajax({
+                        type: "GET",
+                        url: ApiClient.getUrl("SubtitleDownloader/Configuration"),
+                        dataType: "json"
+                    }).then(function (config) {
+                        page.querySelector("#txtPreferredLanguages").value = config.PreferredLanguages || "en,fa";
+                        page.querySelector("#chkSaveToMediaDirectory").checked = config.SaveToMediaDirectory !== false;
+                        page.querySelector("#chkHighlightSyncMatches").checked = config.HighlightSyncMatches !== false;
+                        page.querySelector("#chkDisableScriptInjectionMiddleware").checked = config.DisableScriptInjectionMiddleware === true;
+
+                        page.querySelector("#chkOpenSubtitlesEnabled").checked = config.OpenSubtitlesEnabled !== false;
+                        page.querySelector("#txtOpenSubtitlesApiKey").value = config.OpenSubtitlesApiKey || "";
+                        page.querySelector("#txtOpenSubtitlesUsername").value = config.OpenSubtitlesUsername || "";
+                        page.querySelector("#txtOpenSubtitlesPassword").value = config.OpenSubtitlesPassword || "";
+
+                        page.querySelector("#chkSubdlEnabled").checked = config.SubdlEnabled !== false;
+                        page.querySelector("#txtSubdlApiKey").value = config.SubdlApiKey || "";
+
+                        page.querySelector("#chkJellyfinInternalEnabled").checked = config.JellyfinInternalEnabled !== false;
+
+                        Dashboard.hideLoadingMsg();
+                    }).catch(function (err) {
+                        Dashboard.hideLoadingMsg();
+                        console.error("Failed to load SubtitleDownloader configuration:", err);
+                    });
+                }
+
+                function saveConfig(page) {
+                    Dashboard.showLoadingMsg();
+                    var config = {
+                        PreferredLanguages: page.querySelector("#txtPreferredLanguages").value,
+                        SaveToMediaDirectory: page.querySelector("#chkSaveToMediaDirectory").checked,
+                        HighlightSyncMatches: page.querySelector("#chkHighlightSyncMatches").checked,
+                        DisableScriptInjectionMiddleware: page.querySelector("#chkDisableScriptInjectionMiddleware").checked,
+
+                        OpenSubtitlesEnabled: page.querySelector("#chkOpenSubtitlesEnabled").checked,
+                        OpenSubtitlesApiKey: page.querySelector("#txtOpenSubtitlesApiKey").value,
+                        OpenSubtitlesUsername: page.querySelector("#txtOpenSubtitlesUsername").value,
+                        OpenSubtitlesPassword: page.querySelector("#txtOpenSubtitlesPassword").value,
+
+                        SubdlEnabled: page.querySelector("#chkSubdlEnabled").checked,
+                        SubdlApiKey: page.querySelector("#txtSubdlApiKey").value,
+
+                        JellyfinInternalEnabled: page.querySelector("#chkJellyfinInternalEnabled").checked
+                    };
+
+                    ApiClient.ajax({
+                        type: "POST",
+                        url: ApiClient.getUrl("SubtitleDownloader/Configuration"),
+                        data: JSON.stringify(config),
+                        contentType: "application/json"
+                    }).then(function () {
+                        Dashboard.hideLoadingMsg();
+                        Dashboard.alert("Subtitle Downloader configuration saved!");
+                    }).catch(function (err) {
+                        Dashboard.hideLoadingMsg();
+                        Dashboard.alert("Error saving configuration: " + err);
+                    });
+                }
+
+                function testProvider(providerName, resultElement) {
+                    resultElement.className = "subdl-test-result";
+                    resultElement.style.display = "block";
+                    resultElement.textContent = "Testing " + providerName + "...";
+
+                    ApiClient.ajax({
+                        type: "POST",
+                        url: ApiClient.getUrl("SubtitleDownloader/TestProvider", { provider: providerName }),
+                        dataType: "json"
+                    }).then(function (results) {
+                        var res = Array.isArray(results) ? results[0] : results;
+                        if (res && res.Success) {
+                            resultElement.className = "subdl-test-result success";
+                            resultElement.textContent = "✓ " + res.Message;
+                        } else {
+                            resultElement.className = "subdl-test-result error";
+                            resultElement.textContent = "✗ " + (res ? res.Message : "Connection failed.");
+                        }
+                    }).catch(function (err) {
+                        resultElement.className = "subdl-test-result error";
+                        resultElement.textContent = "✗ Test request failed: " + err;
+                    });
+                }
+
+                document.querySelector("#SubtitleDownloaderConfigPage").addEventListener("pageshow", function () {
+                    var page = this;
+                    loadConfig(page);
+
+                    page.querySelector("#subtitleDownloaderForm").onsubmit = function (e) {
+                        e.preventDefault();
+                        saveConfig(page);
+                        return false;
+                    };
+
+                    page.querySelector("#btnTestOpenSubtitles").onclick = function () {
+                        testProvider("OpenSubtitles", page.querySelector("#testResultOpenSubtitles"));
+                    };
+
+                    page.querySelector("#btnTestSubdl").onclick = function () {
+                        testProvider("SubDL", page.querySelector("#testResultSubdl"));
+                    };
+
+                    page.querySelector("#btnTestJellyfin").onclick = function () {
+                        testProvider("Jellyfin", page.querySelector("#testResultJellyfin"));
+                    };
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>

@@ -1,0 +1,82 @@
+.subdl-config-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.subdl-header-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 0;
+    margin-bottom: 12px;
+    font-size: 1.25rem;
+    color: #00a4dc;
+}
+
+.subdl-header-title .material-icons {
+    font-size: 28px;
+}
+
+.subdl-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 4px;
+    text-transform: uppercase;
+    background: #10b981;
+    color: #fff;
+    margin-left: 8px;
+}
+
+.subdl-badge.free {
+    background: #3b82f6;
+}
+
+.subdl-input-container {
+    margin-bottom: 16px;
+}
+
+.subdl-help-text {
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.6);
+    margin-top: 4px;
+}
+
+.subdl-help-text a {
+    color: #00a4dc;
+    text-decoration: underline;
+}
+
+.subdl-actions-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.subdl-test-result {
+    margin-top: 12px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    display: none;
+}
+
+.subdl-test-result.success {
+    display: block;
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid #10b981;
+    color: #34d399;
+}
+
+.subdl-test-result.error {
+    display: block;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid #ef4444;
+    color: #f87171;
+}
